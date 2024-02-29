@@ -13,9 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.agrona.concurrent.ringbuffer;
 
 import org.agrona.ExpandableArrayBuffer;
+import org.agrona.collections.LongArrayList;
 import org.agrona.collections.MutableInteger;
 import org.agrona.concurrent.ControlledMessageHandler;
 import org.agrona.concurrent.MessageHandler;
@@ -68,7 +70,7 @@ class ManyToOneRingBufferTest
 
 
     @ParameterizedTest
-    @ValueSource(ints = { 2, 4 })
+    @ValueSource(ints = {2, 4})
     void shouldThrowExceptionIfCapacityIsBelowMinCapacity(final int capacity)
     {
         when(buffer.capacity()).thenReturn(TRAILER_LENGTH + capacity);
@@ -76,8 +78,9 @@ class ManyToOneRingBufferTest
         final IllegalArgumentException exception =
             assertThrows(IllegalArgumentException.class, () -> new ManyToOneRingBuffer(buffer));
 
-        assertEquals("insufficient capacity: minCapacity=" + (TRAILER_LENGTH + MIN_CAPACITY) +
-            ", capacity=" + (TRAILER_LENGTH + capacity),
+        assertEquals(
+            "insufficient capacity: minCapacity=" + (TRAILER_LENGTH + MIN_CAPACITY) +
+                ", capacity=" + (TRAILER_LENGTH + capacity),
             exception.getMessage());
     }
 
@@ -457,7 +460,8 @@ class ManyToOneRingBufferTest
     {
         final int capacity = 777;
         final int totalBufferLength = capacity + TRAILER_LENGTH;
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(
+            IllegalArgumentException.class,
             () -> new ManyToOneRingBuffer(new UnsafeBuffer(new byte[totalBufferLength])));
     }
 
@@ -466,7 +470,8 @@ class ManyToOneRingBufferTest
     {
         final UnsafeBuffer srcBuffer = new UnsafeBuffer(allocateDirect(1024));
 
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(
+            IllegalArgumentException.class,
             () -> ringBuffer.write(MSG_TYPE_ID, srcBuffer, 0, ringBuffer.maxMsgLength() + 1));
     }
 
@@ -629,7 +634,7 @@ class ManyToOneRingBufferTest
     }
 
     @ParameterizedTest
-    @ValueSource(ints = { -2, 0, 7, CAPACITY + 1 })
+    @ValueSource(ints = {-2, 0, 7, CAPACITY + 1})
     void commitThrowsIllegalArgumentExceptionIfIndexIsOutOfBounds(final int index)
     {
         assertThrows(IllegalArgumentException.class, () -> ringBuffer.commit(index));
@@ -664,7 +669,7 @@ class ManyToOneRingBufferTest
     }
 
     @ParameterizedTest
-    @ValueSource(ints = { -1, 0, 7, CAPACITY + 1 })
+    @ValueSource(ints = {-1, 0, 7, CAPACITY + 1})
     void abortThrowsIllegalArgumentExceptionIfIndexIsInvalid(final int index)
     {
         assertThrows(IllegalArgumentException.class, () -> ringBuffer.abort(index));
@@ -858,6 +863,57 @@ class ManyToOneRingBufferTest
         assertEquals(1, ringBuffer.read(
             (msgTypeId, buffer, index, length) -> assertEquals(Long.MAX_VALUE, buffer.getLong(index))));
         assertEquals(0, ringBuffer.read((msgTypeId, buffer, index, length) -> fail()));
+    }
+
+    @Test
+    void shouldNotTryToReprocessMessagesThatThrow()
+    {
+        final UnsafeBuffer buffer = new UnsafeBuffer(allocateDirect(1024));
+        final RingBuffer sut = new ManyToOneRingBuffer(buffer);
+
+        // Add three messages
+        final int index1 = sut.tryClaim(1, SIZE_OF_LONG);
+        buffer.putLong(index1, 42);
+        sut.commit(index1);
+
+        final int index2 = sut.tryClaim(1, SIZE_OF_LONG);
+        buffer.putLong(index2, 43);
+        sut.commit(index2);
+
+        final int index3 = sut.tryClaim(1, SIZE_OF_LONG);
+        buffer.putLong(index3, 44);
+        sut.commit(index3);
+
+        final LongArrayList observedValues = new LongArrayList();
+
+        // Consume messages and throw on value=43
+
+        int drained = -1;
+
+        while (drained != 0)
+        {
+            try
+            {
+                drained = sut.controlledRead((msgTypeId, srcBuffer, index, length) ->
+                {
+                    final long value = srcBuffer.getLong(index);
+                    observedValues.add(value);
+                    if (value == 43)
+                    {
+                        throw new RuntimeException("expected");
+                    }
+                    return ControlledMessageHandler.Action.CONTINUE;
+                }, 2);
+            }
+            catch (RuntimeException exn)
+            {
+            }
+        }
+
+        assertEquals(3, observedValues.size());
+        assertEquals(42, observedValues.getLong(0));
+        assertEquals(43, observedValues.getLong(1));
+        assertEquals(44, observedValues.getLong(2));
     }
 
     private void testAlreadyCommitted(final IntConsumer action)
